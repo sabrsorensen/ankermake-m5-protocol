@@ -185,12 +185,36 @@ def test_octoprint_compat_routes_expose_cura_expected_shapes():
 
     assert probe.status_code == 204
     assert request_token.status_code == 201
-    assert poll.get_json()["api_key"] == "ankerctl"
+    assert poll.get_json()["api_key"] == API_KEY
     assert settings.get_json()["appearance"]["name"] == "ankerctl"
+    assert settings.get_json()["webcam"]["streamUrl"] == "/webcam/?action=stream"
+    assert settings.get_json()["webcam"]["snapshotUrl"] == "/webcam/?action=snapshot"
     assert printer.get_json()["temperature"]["tool0"]["actual"] == 215.0
     assert printer.get_json()["state"]["flags"]["printing"] is True
     assert job.get_json()["job"]["file"]["name"] == "cube.gcode"
     assert job.get_json()["progress"]["completion"] == 42.0
+
+
+def test_octoprint_webcam_snapshot_delegates_to_snapshot_route(monkeypatch):
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+
+    calls = []
+
+    def fake_snapshot(as_attachment=True):
+        calls.append(as_attachment)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("web.app_api_snapshot", fake_snapshot)
+
+    try:
+        response = client.get("/webcam/?action=snapshot")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
+    assert calls == [False]
 
 
 def test_octoprint_upload_defaults_to_print_and_returns_octoprint_shape():

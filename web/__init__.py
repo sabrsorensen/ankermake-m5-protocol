@@ -1106,12 +1106,19 @@ def _octoprint_job_payload():
 
 
 def _octoprint_settings_payload():
+    stream_url = None
+    snapshot_url = None
+    if app.config.get("video_supported"):
+        stream_url = "/webcam/?action=stream"
+        snapshot_url = "/webcam/?action=snapshot"
+
     return {
         "feature": {
             "sdSupport": False,
         },
         "webcam": {
-            "streamUrl": "/video" if app.config.get("video_supported") else None,
+            "streamUrl": stream_url,
+            "snapshotUrl": snapshot_url,
             "flipH": False,
             "flipV": False,
             "rotate90": False,
@@ -1152,6 +1159,21 @@ def _clamp_command_line(line):
 
 def _sanitize_gcode_lines(lines):
     return [_clamp_command_line(line) for line in lines]
+
+
+def _internal_video_url():
+    host = os.getenv("FLASK_HOST") or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = os.getenv("FLASK_PORT") or "4470"
+    url = f"http://{host}:{port}/video"
+
+    api_key = app.config.get("api_key")
+    if api_key:
+        from urllib.parse import quote as _quote
+        url += f"?apikey={_quote(api_key, safe='')}"
+
+    return url
 
 
 def _deep_update(base, updates):
@@ -2828,6 +2850,76 @@ def video_download():
     return Response(generate(), mimetype="video/mp4")
 
 
+@app.get("/webcam/")
+@app.get("/webcam")
+def app_octoprint_webcam():
+    action = request.args.get("action", "stream")
+
+    if action == "snapshot":
+        return app_api_snapshot(as_attachment=False)
+
+    if action != "stream":
+        return {"error": "Invalid webcam action"}, 400
+
+    if not app.config.get("video_supported"):
+        return {"error": "Video not supported on this platform"}, 400
+
+    if not shutil.which("ffmpeg"):
+        return {"error": "ffmpeg not installed"}, 500
+
+    source_url = _internal_video_url()
+
+    def generate():
+        proc = None
+        stderr = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-loglevel", "error",
+                    "-nostdin",
+                    "-f", "h264",
+                    "-i", source_url,
+                    "-vf", "fps=5",
+                    "-q:v", "5",
+                    "-f", "mpjpeg",
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            stderr = proc.stderr
+            while True:
+                chunk = proc.stdout.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            log.warning(f"OctoPrint webcam proxy failed: {exc}")
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            if stderr is not None:
+                try:
+                    err = stderr.read().decode("utf-8", "replace").strip()
+                    if err:
+                        log.warning(f"OctoPrint webcam ffmpeg stderr: {err}")
+                except Exception:
+                    pass
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=ffmpeg")
+
+
 @app.get("/")
 def app_root():
     """
@@ -3088,7 +3180,7 @@ def app_plugin_appkeys_probe():
 def app_plugin_appkeys_request():
     compat = _ensure_octoprint_compat_state()
     request_id = token(16)
-    compat["app_keys"][request_id] = compat["api_key"]
+    compat["app_keys"][request_id] = app.config.get("api_key") or compat["api_key"]
 
     response = jsonify({
         "app_token": request_id,
@@ -3106,7 +3198,7 @@ def app_plugin_appkeys_request():
 @app.get("/plugin/appkeys/request/<request_id>")
 def app_plugin_appkeys_request_poll(request_id):
     compat = _ensure_octoprint_compat_state()
-    api_key = compat["app_keys"].pop(request_id, compat["api_key"])
+    api_key = compat["app_keys"].pop(request_id, app.config.get("api_key") or compat["api_key"])
     return {"api_key": api_key}
 
 
@@ -4625,7 +4717,7 @@ def app_api_camera_stream():
 
 
 @app.get("/api/snapshot")
-def app_api_snapshot():
+def app_api_snapshot(as_attachment=True):
     """Capture a JPEG snapshot from the camera and return it as a file download."""
     import subprocess
     from datetime import datetime
@@ -4680,7 +4772,7 @@ def app_api_snapshot():
             pass
         return response
 
-    return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
+    return send_file(temp_path, mimetype="image/jpeg", as_attachment=as_attachment)
 
 @app.get("/api/history")
 def app_api_history():

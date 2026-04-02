@@ -34,12 +34,43 @@
 
 ## Docker Compose Instructions
 
-To start `ankerctl` using docker compose, run:
+This repository is intended to be built locally. The provided
+`docker-compose.yaml` references the local image tag
+`django01982/ankerctl:local`, so you should build the image first,
+then start it with Docker Compose.
+
+1. Copy the example environment file and adjust the values:
 
 ```sh
-docker compose pull
-docker compose up
+cp .env.example .env
 ```
+
+2. Build the local image:
+
+```sh
+docker compose build
+```
+
+If you want the container user to match your host UID/GID, build with:
+
+```sh
+docker compose build --build-arg UID=$(id -u) --build-arg GID=$(id -g)
+```
+
+3. Start `ankerctl` using Docker Compose:
+
+```sh
+docker compose up -d
+```
+
+4. To rebuild after code changes:
+
+```sh
+docker compose up -d --build
+```
+
+The compose file uses `network_mode: host`, which is required for PPPP
+communication with the printer on Linux.
 
 ### Customizing UID/GID
 
@@ -62,13 +93,12 @@ docker compose build --build-arg UID=$(id -u) --build-arg GID=$(id -g)
 
 ### Enabling API Key Authentication
 
-By default, the web server is open (no authentication). To enable API key authentication, set the `ANKERCTL_API_KEY` environment variable in `docker-compose.yaml`:
+By default, the web server is open (no authentication). To enable API key authentication, set the `ANKERCTL_API_KEY` environment variable in `.env`:
 
-```yaml
-environment:
-    - FLASK_HOST=127.0.0.1
-    - FLASK_PORT=4470
-    - ANKERCTL_API_KEY=your-secret-key-here
+```sh
+FLASK_HOST=127.0.0.1
+FLASK_PORT=4470
+ANKERCTL_API_KEY=your-secret-key-here
 ```
 
 When set, all API endpoints require authentication via one of:
