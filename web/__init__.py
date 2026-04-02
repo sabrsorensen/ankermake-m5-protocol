@@ -311,6 +311,40 @@ app.pppp_probe = {
 }
 
 
+_OCTOPRINT_PERMISSION_SPECS = (
+    (
+        "STATUS",
+        "Status",
+        False,
+        "Allows reading printer status information.",
+    ),
+    (
+        "FILES_LIST",
+        "File List",
+        False,
+        "Allows listing uploaded files.",
+    ),
+    (
+        "FILES_UPLOAD",
+        "File Upload",
+        True,
+        "Allows uploading new files.",
+    ),
+    (
+        "FILES_SELECT",
+        "File Select",
+        True,
+        "Allows selecting uploaded files for printing.",
+    ),
+    (
+        "CONTROL",
+        "Printer Control",
+        True,
+        "Allows sending control commands to the printer.",
+    ),
+)
+
+
 def _env_int(name, default, min_value=1, env=None):
     env = os.environ if env is None else env
     raw = env.get(name)
@@ -328,6 +362,84 @@ def _env_int(name, default, min_value=1, env=None):
         return default
 
     return value
+
+
+def _octoprint_permissions():
+    permissions = []
+    for key, name, dangerous, description in _OCTOPRINT_PERMISSION_SPECS:
+        permissions.append({
+            "key": key,
+            "name": name,
+            "dangerous": dangerous,
+            "default_groups": ["admins", "users"],
+            "description": description,
+            "needs": {},
+        })
+    return permissions
+
+
+def _request_has_valid_api_key():
+    api_key = app.config.get("api_key")
+    if not api_key:
+        return True
+
+    header_key = request.headers.get("X-Api-Key")
+    if header_key and secrets.compare_digest(header_key, api_key):
+        return True
+
+    url_key = request.args.get("apikey")
+    if url_key and secrets.compare_digest(url_key, api_key):
+        return True
+
+    return False
+
+
+def _octoprint_is_authenticated():
+    if session.get("authenticated"):
+        return True
+    return _request_has_valid_api_key()
+
+
+def _octoprint_user_name():
+    try:
+        with app.config["config"].open() as cfg:
+            if cfg and getattr(cfg, "account", None):
+                account = cfg.account
+                return (
+                    getattr(account, "email", None)
+                    or getattr(account, "user_id", None)
+                    or "ankerctl"
+                )
+    except Exception as exc:
+        log.debug(f"Could not resolve OctoPrint compatibility user name: {exc}")
+    return "ankerctl"
+
+
+def _octoprint_user_record(*, authenticated):
+    if not authenticated:
+        return {
+            "name": None,
+            "active": False,
+            "admin": False,
+            "user": False,
+            "apikey": None,
+            "settings": {},
+            "groups": [],
+            "permissions": [],
+            "needs": {},
+        }
+
+    return {
+        "name": _octoprint_user_name(),
+        "active": True,
+        "admin": True,
+        "user": True,
+        "apikey": None,
+        "settings": {},
+        "groups": ["admins", "users"],
+        "permissions": _octoprint_permissions(),
+        "needs": {"role": ["admin", "user"], "group": ["admins", "users"]},
+    }
 
 
 def _ffmpeg_path():
@@ -3216,6 +3328,35 @@ def app_api_printer():
 @app.get("/api/job")
 def app_api_job():
     return _octoprint_job_payload()
+
+
+@app.get("/api/currentuser")
+def app_api_currentuser():
+    """Return the current user in an OctoPrint-compatible shape."""
+    return jsonify(_octoprint_user_record(authenticated=_octoprint_is_authenticated()))
+
+
+@app.post("/api/login")
+def app_api_login():
+    """Provide passive OctoPrint-compatible login for slicer clients."""
+    payload = request.get_json(silent=True)
+    passive = True
+    if isinstance(payload, dict):
+        passive = payload.get("passive", True)
+
+    if not passive:
+        return jsonify({"error": "Only passive login is supported."}), 400
+
+    authenticated = _octoprint_is_authenticated()
+    user = _octoprint_user_record(authenticated=authenticated)
+    session_key = request.cookies.get(app.config.get("SESSION_COOKIE_NAME", "session")) or ""
+
+    return jsonify({
+        **user,
+        "_is_external_client": False,
+        "_login_mechanism": "apikey" if _request_has_valid_api_key() else "session",
+        "session": session_key,
+    })
 
 
 @app.post("/api/ankerctl/config/upload")
