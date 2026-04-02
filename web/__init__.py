@@ -396,6 +396,37 @@ def _request_api_key_value():
     return None
 
 
+def _request_auth_debug_summary():
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    auth_scheme = None
+    auth_token_present = False
+    if auth_header:
+        scheme, _, token_value = auth_header.partition(" ")
+        auth_scheme = scheme or None
+        auth_token_present = bool(token_value.strip())
+
+    return {
+        "method": request.method,
+        "path": request.path,
+        "query_keys": sorted(request.args.keys()),
+        "has_apikey_query": "apikey" in request.args,
+        "has_x_api_key": bool(request.headers.get("X-Api-Key")),
+        "authorization_scheme": auth_scheme,
+        "authorization_token_present": auth_token_present,
+        "user_agent": request.headers.get("User-Agent", ""),
+        "content_type": request.headers.get("Content-Type", ""),
+        "has_session_auth": bool(session.get("authenticated")),
+        "form_keys": sorted(request.form.keys()) if request.form else [],
+        "file_keys": sorted(request.files.keys()) if request.files else [],
+    }
+
+
+def _log_request_auth_debug(event, level="info", **extra):
+    payload = _request_auth_debug_summary()
+    payload.update(extra)
+    getattr(log, level)("auth-debug %s: %s", event, payload)
+
+
 def _request_has_valid_api_key():
     api_key = app.config.get("api_key")
     if not api_key:
@@ -3345,7 +3376,9 @@ def app_api_job():
 @app.get("/api/currentuser")
 def app_api_currentuser():
     """Return the current user in an OctoPrint-compatible shape."""
-    return jsonify(_octoprint_user_record(authenticated=_octoprint_is_authenticated()))
+    authenticated = _octoprint_is_authenticated()
+    _log_request_auth_debug("api_currentuser", authenticated=authenticated)
+    return jsonify(_octoprint_user_record(authenticated=authenticated))
 
 
 @app.post("/api/login")
@@ -3360,6 +3393,7 @@ def app_api_login():
         return jsonify({"error": "Only passive login is supported."}), 400
 
     authenticated = _octoprint_is_authenticated()
+    _log_request_auth_debug("api_login", authenticated=authenticated, passive=passive)
     user = _octoprint_user_record(authenticated=authenticated)
     session_key = request.cookies.get(app.config.get("SESSION_COOKIE_NAME", "session")) or ""
 
@@ -3523,6 +3557,7 @@ def app_api_files_local():
     Returns:
         A dictionary containing file details
     """
+    _log_request_auth_debug("api_files_local_enter")
     user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
 
     try:
@@ -6277,4 +6312,5 @@ def _check_api_key():
         return None
 
     # Unauthorized
+    _log_request_auth_debug("api_key_rejected", level="warning")
     return jsonify({"error": "Unauthorized. Provide API key via Authorization: Bearer, X-Api-Key header or ?apikey= parameter."}), 401
