@@ -231,3 +231,20 @@ def test_pppp_remote_close_log_is_rate_limited(monkeypatch):
     assert len(warnings) == 2
     assert warnings[0].startswith("PPPP: received CLOSE from remote peer")
     assert warnings[1].endswith("(seen 3 times)")
+
+
+def test_open_lan_prefers_lan_port_and_falls_back(monkeypatch):
+    calls = []
+
+    def fake_open(cls, duid, host, port, bind_port=0):
+        calls.append(bind_port)
+        if bind_port == PPPP_LAN_PORT:
+            raise OSError("busy")
+        return "ok"
+
+    monkeypatch.setattr(AnkerPPPPBaseApi, "open", classmethod(fake_open))
+
+    result = AnkerPPPPBaseApi.open_lan(_duid(), "192.168.1.25")
+
+    assert result == "ok"
+    assert calls == [PPPP_LAN_PORT, 0]
