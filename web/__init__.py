@@ -378,17 +378,31 @@ def _octoprint_permissions():
     return permissions
 
 
+def _request_api_key_value():
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header:
+        scheme, _, token_value = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and token_value:
+            return token_value.strip()
+
+    header_key = request.headers.get("X-Api-Key")
+    if header_key:
+        return header_key
+
+    url_key = request.args.get("apikey")
+    if url_key:
+        return url_key
+
+    return None
+
+
 def _request_has_valid_api_key():
     api_key = app.config.get("api_key")
     if not api_key:
         return True
 
-    header_key = request.headers.get("X-Api-Key")
-    if header_key and secrets.compare_digest(header_key, api_key):
-        return True
-
-    url_key = request.args.get("apikey")
-    if url_key and secrets.compare_digest(url_key, api_key):
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
         return True
 
     return False
@@ -2507,8 +2521,8 @@ def _validate_ws_auth(sock):
         return True
     if session.get("authenticated"):
         return True
-    header_key = request.headers.get("X-Api-Key")
-    if header_key and secrets.compare_digest(header_key, api_key):
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
         return True
     try:
         sock.send(json.dumps({"error": "unauthorized"}))
@@ -2922,12 +2936,10 @@ def video_download():
     # the request comes from localhost.
     api_key = app.config.get("api_key")
     if api_key:
-        _hdr = request.headers.get("X-Api-Key", "")
-        _qry = request.args.get("apikey", "")
+        provided_key = _request_api_key_value()
         authed = (
             session.get("authenticated")
-            or (_hdr and secrets.compare_digest(_hdr, api_key))
-            or (_qry and secrets.compare_digest(_qry, api_key))
+            or (provided_key and secrets.compare_digest(provided_key, api_key))
         )
         if not authed:
             log.warning("/video rejected: missing or invalid API key")
@@ -6236,9 +6248,9 @@ def _check_api_key():
         clean_url = _safe_same_site_redirect_target(request.path, params)
         return redirect(clean_url)
 
-    # Check X-Api-Key header (slicer / programmatic access)
-    header_key = request.headers.get("X-Api-Key")
-    if header_key and secrets.compare_digest(header_key, api_key):
+    # Check supported API-key transports used by OctoPrint-compatible clients.
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
         return None
 
     # Allow read-only (GET/HEAD/OPTIONS) unless the path is explicitly protected.
@@ -6265,4 +6277,4 @@ def _check_api_key():
         return None
 
     # Unauthorized
-    return jsonify({"error": "Unauthorized. Provide API key via X-Api-Key header or ?apikey= parameter."}), 401
+    return jsonify({"error": "Unauthorized. Provide API key via Authorization: Bearer, X-Api-Key header or ?apikey= parameter."}), 401

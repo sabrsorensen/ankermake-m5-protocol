@@ -482,6 +482,37 @@ def test_octoprint_currentuser_and_passive_login_report_authenticated_user():
         app.config["config"] = old_config
 
 
+def test_octoprint_currentuser_accepts_bearer_api_key():
+    client = app.test_client()
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    old_config = app.config.get("config")
+    app.config["login"] = True
+    app.config["api_key"] = "secret-key-123456"
+    app.config["config"] = FakeConfigManager(
+        Config(
+            account=Account(
+                auth_token="token",
+                region="eu",
+                user_id="user-1",
+                email="user@example.com",
+            ),
+            printers=[_printer("SN1", "Printer One")],
+        )
+    )
+
+    try:
+        current = client.get("/api/currentuser", headers={"Authorization": "Bearer secret-key-123456"})
+
+        assert current.status_code == 200
+        assert current.get_json()["name"] == "user@example.com"
+        assert any(item["key"] == "FILES_UPLOAD" for item in current.get_json()["permissions"])
+    finally:
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+        app.config["config"] = old_config
+
+
 def test_octoprint_currentuser_without_auth_is_anonymous():
     client = app.test_client()
     old_login = app.config.get("login")

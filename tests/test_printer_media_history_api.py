@@ -249,6 +249,38 @@ def test_octoprint_upload_defaults_to_print_and_returns_octoprint_shape():
     assert response.get_json()["files"]["local"]["name"] == "cube.gcode"
 
 
+def test_octoprint_upload_accepts_bearer_api_key():
+    sent = []
+
+    class FakeFileTransfer:
+        def send_file(self, fd, user_name, rate_limit_mbps=None, start_print=None, printer_index=None):
+            sent.append({
+                "filename": fd.filename,
+                "user_name": user_name,
+                "rate_limit_mbps": rate_limit_mbps,
+                "start_print": start_print,
+                "printer_index": printer_index,
+            })
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+    app.svc = FakeServices(mqttqueue=SimpleNamespace(is_printing=False), filetransfer=FakeFileTransfer())
+
+    try:
+        response = client.post(
+            "/api/files/local",
+            data={"file": (__import__("io").BytesIO(b"G28"), "cube.gcode")},
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            content_type="multipart/form-data",
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert sent[0]["start_print"] is True
+    assert response.get_json()["files"]["local"]["name"] == "cube.gcode"
+
+
 def test_printer_control_and_autolevel_routes_validate_and_dispatch():
     control_calls = []
     autolevel_calls = []
