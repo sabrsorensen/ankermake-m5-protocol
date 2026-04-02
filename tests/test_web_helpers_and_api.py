@@ -17,6 +17,8 @@ from web import (
     _extract_report_commands,
     _filament_service_length,
     _filament_service_temp,
+    _internal_video_ffmpeg_headers,
+    _internal_video_url,
     _format_signed_mm,
     _probe_printer_storage_files,
     _parse_z_offset_mm,
@@ -153,6 +155,17 @@ def test_configure_request_limits_separates_file_and_form_limits():
     assert flask_app.config["MAX_CONTENT_LENGTH"] == 4096 * 1024 * 1024
     assert flask_app.config["MAX_FORM_MEMORY_SIZE"] == 1024 * 1024
     assert flask_app.config["MAX_FORM_PARTS"] == 12
+
+
+def test_internal_video_helpers_use_header_auth_instead_of_query_param():
+    old_api_key = app.config.get("api_key")
+    app.config["api_key"] = "secret-key-123456"
+
+    try:
+        assert _internal_video_url() == "http://127.0.0.1:4470/video"
+        assert _internal_video_ffmpeg_headers() == ["-headers", "Authorization: Bearer secret-key-123456\r\n"]
+    finally:
+        app.config["api_key"] = old_api_key
 
 
 def test_resolve_root_dir_supports_bundled_and_source_layouts(tmp_path):

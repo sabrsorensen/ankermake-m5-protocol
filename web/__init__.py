@@ -1323,14 +1323,14 @@ def _internal_video_url():
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"
     port = os.getenv("FLASK_PORT") or "4470"
-    url = f"http://{host}:{port}/video"
+    return f"http://{host}:{port}/video"
 
+
+def _internal_video_ffmpeg_headers():
     api_key = app.config.get("api_key")
-    if api_key:
-        from urllib.parse import quote as _quote
-        url += f"?apikey={_quote(api_key, safe='')}"
-
-    return url
+    if not api_key:
+        return []
+    return ["-headers", f"Authorization: Bearer {api_key}\r\n"]
 
 
 def _deep_update(base, updates):
@@ -3028,12 +3028,14 @@ def app_octoprint_webcam():
         proc = None
         stderr = None
         try:
+            ffmpeg_headers = _internal_video_ffmpeg_headers()
             proc = subprocess.Popen(
                 [
                     "ffmpeg",
                     "-loglevel", "error",
                     "-nostdin",
                     "-f", "h264",
+                    *ffmpeg_headers,
                     "-i", source_url,
                     "-vf", "fps=5",
                     "-q:v", "5",
