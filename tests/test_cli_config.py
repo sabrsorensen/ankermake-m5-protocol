@@ -185,7 +185,7 @@ def test_import_config_recovers_truncated_webview_auth_token(monkeypatch):
     )
     monkeypatch.setattr("cli.config.get_printer_ips", lambda config: {})
     monkeypatch.setattr("cli.config.merge_config_preferences", lambda existing, new_config: new_config)
-    monkeypatch.setattr("cli.config.update_empty_printer_ips", lambda config, printer_ips: None)
+    monkeypatch.setattr("cli.config.restore_printer_ips", lambda config, printer_ips: None)
 
     import_config_from_server(
         manager,
