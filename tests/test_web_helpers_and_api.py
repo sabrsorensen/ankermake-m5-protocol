@@ -17,6 +17,8 @@ from web import (
     _extract_report_commands,
     _filament_service_length,
     _filament_service_temp,
+    _internal_video_ffmpeg_headers,
+    _internal_video_url,
     _format_signed_mm,
     _probe_printer_storage_files,
     _parse_z_offset_mm,
@@ -153,6 +155,17 @@ def test_configure_request_limits_separates_file_and_form_limits():
     assert flask_app.config["MAX_CONTENT_LENGTH"] == 4096 * 1024 * 1024
     assert flask_app.config["MAX_FORM_MEMORY_SIZE"] == 1024 * 1024
     assert flask_app.config["MAX_FORM_PARTS"] == 12
+
+
+def test_internal_video_helpers_use_header_auth_instead_of_query_param():
+    old_api_key = app.config.get("api_key")
+    app.config["api_key"] = "secret-key-123456"
+
+    try:
+        assert _internal_video_url() == "http://127.0.0.1:4470/video"
+        assert _internal_video_ffmpeg_headers() == ["-headers", "Authorization: Bearer secret-key-123456\r\n"]
+    finally:
+        app.config["api_key"] = old_api_key
 
 
 def test_resolve_root_dir_supports_bundled_and_source_layouts(tmp_path):
@@ -443,6 +456,105 @@ def test_api_console_logs_returns_recent_entries(monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["entries"] == [{"id": 42, "text": "[*] printer ready"}]
     assert calls == [(25, 10)]
+
+
+def test_octoprint_currentuser_and_passive_login_report_authenticated_user():
+    client = app.test_client()
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    old_config = app.config.get("config")
+    app.config["login"] = True
+    app.config["api_key"] = "secret-key-123456"
+    app.config["config"] = FakeConfigManager(
+        Config(
+            account=Account(
+                auth_token="token",
+                region="eu",
+                user_id="user-1",
+                email="user@example.com",
+            ),
+            printers=[_printer("SN1", "Printer One")],
+        )
+    )
+
+    try:
+        current = client.get("/api/currentuser", headers={"X-Api-Key": "secret-key-123456"})
+        login = client.post("/api/login", json={"passive": True}, headers={"X-Api-Key": "secret-key-123456"})
+
+        assert current.status_code == 200
+        assert current.get_json()["name"] == "user@example.com"
+        assert any(item["key"] == "FILES_UPLOAD" for item in current.get_json()["permissions"])
+
+        assert login.status_code == 200
+        assert login.get_json()["name"] == "user@example.com"
+        assert login.get_json()["_login_mechanism"] == "apikey"
+        assert any(item["key"] == "FILES_UPLOAD" for item in login.get_json()["permissions"])
+    finally:
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+        app.config["config"] = old_config
+
+
+def test_octoprint_currentuser_accepts_bearer_api_key():
+    client = app.test_client()
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    old_config = app.config.get("config")
+    app.config["login"] = True
+    app.config["api_key"] = "secret-key-123456"
+    app.config["config"] = FakeConfigManager(
+        Config(
+            account=Account(
+                auth_token="token",
+                region="eu",
+                user_id="user-1",
+                email="user@example.com",
+            ),
+            printers=[_printer("SN1", "Printer One")],
+        )
+    )
+
+    try:
+        current = client.get("/api/currentuser", headers={"Authorization": "Bearer secret-key-123456"})
+
+        assert current.status_code == 200
+        assert current.get_json()["name"] == "user@example.com"
+        assert any(item["key"] == "FILES_UPLOAD" for item in current.get_json()["permissions"])
+    finally:
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+        app.config["config"] = old_config
+
+
+def test_octoprint_currentuser_without_auth_is_anonymous():
+    client = app.test_client()
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    old_config = app.config.get("config")
+    app.config["login"] = True
+    app.config["api_key"] = "secret-key-123456"
+    app.config["config"] = FakeConfigManager(
+        Config(
+            account=Account(
+                auth_token="token",
+                region="eu",
+                user_id="user-1",
+                email="user@example.com",
+            ),
+            printers=[_printer("SN1", "Printer One")],
+        )
+    )
+
+    try:
+        current = client.get("/api/currentuser")
+
+        assert current.status_code == 200
+        assert current.get_json()["name"] is None
+        assert current.get_json()["permissions"] == []
+    finally:
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+        app.config["config"] = old_config
 
 
 def test_api_printers_and_switch_active_printer(monkeypatch):

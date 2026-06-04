@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -310,6 +311,40 @@ app.pppp_probe = {
 }
 
 
+_OCTOPRINT_PERMISSION_SPECS = (
+    (
+        "STATUS",
+        "Status",
+        False,
+        "Allows reading printer status information.",
+    ),
+    (
+        "FILES_LIST",
+        "File List",
+        False,
+        "Allows listing uploaded files.",
+    ),
+    (
+        "FILES_UPLOAD",
+        "File Upload",
+        True,
+        "Allows uploading new files.",
+    ),
+    (
+        "FILES_SELECT",
+        "File Select",
+        True,
+        "Allows selecting uploaded files for printing.",
+    ),
+    (
+        "CONTROL",
+        "Printer Control",
+        True,
+        "Allows sending control commands to the printer.",
+    ),
+)
+
+
 def _env_int(name, default, min_value=1, env=None):
     env = os.environ if env is None else env
     raw = env.get(name)
@@ -327,6 +362,97 @@ def _env_int(name, default, min_value=1, env=None):
         return default
 
     return value
+
+
+def _octoprint_permissions():
+    permissions = []
+    for key, name, dangerous, description in _OCTOPRINT_PERMISSION_SPECS:
+        permissions.append({
+            "key": key,
+            "name": name,
+            "dangerous": dangerous,
+            "default_groups": ["admins", "users"],
+            "description": description,
+            "needs": {},
+        })
+    return permissions
+
+
+def _request_api_key_value():
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header:
+        scheme, _, token_value = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and token_value:
+            return token_value.strip()
+
+    header_key = request.headers.get("X-Api-Key")
+    if header_key:
+        return header_key
+
+    url_key = request.args.get("apikey")
+    if url_key:
+        return url_key
+
+    return None
+
+def _request_has_valid_api_key():
+    api_key = app.config.get("api_key")
+    if not api_key:
+        return True
+
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
+        return True
+
+    return False
+
+
+def _octoprint_is_authenticated():
+    if session.get("authenticated"):
+        return True
+    return _request_has_valid_api_key()
+
+
+def _octoprint_user_name():
+    try:
+        with app.config["config"].open() as cfg:
+            if cfg and getattr(cfg, "account", None):
+                account = cfg.account
+                return (
+                    getattr(account, "email", None)
+                    or getattr(account, "user_id", None)
+                    or "ankerctl"
+                )
+    except Exception as exc:
+        log.debug(f"Could not resolve OctoPrint compatibility user name: {exc}")
+    return "ankerctl"
+
+
+def _octoprint_user_record(*, authenticated):
+    if not authenticated:
+        return {
+            "name": None,
+            "active": False,
+            "admin": False,
+            "user": False,
+            "apikey": None,
+            "settings": {},
+            "groups": [],
+            "permissions": [],
+            "needs": {},
+        }
+
+    return {
+        "name": _octoprint_user_name(),
+        "active": True,
+        "admin": True,
+        "user": True,
+        "apikey": None,
+        "settings": {},
+        "groups": ["admins", "users"],
+        "permissions": _octoprint_permissions(),
+        "needs": {"role": ["admin", "user"], "group": ["admins", "users"]},
+    }
 
 
 def _ffmpeg_path():
@@ -601,6 +727,10 @@ VIDEO_SERVICE_PREFIX = "videoqueue:"
 LEGACY_VIDEO_SERVICE_NAME = "videoqueue"
 PPPP_SERVICE_PREFIX = "pppp:"
 LEGACY_PPPP_SERVICE_NAME = "pppp"
+
+_MAX_NOZZLE_TEMP_C = 260
+_MAX_BED_TEMP_C = 100
+_MAX_EXTRUSION_MM = 100.0
 
 
 def _service_printer_index(printer_index=None):
@@ -986,6 +1116,175 @@ def _stop_switchable_services():
                     break
         except Exception as exc:
             log.debug(f"PPPPService unregister failed: {exc}")
+
+
+def _default_octoprint_compat_state():
+    return {
+        "api_key": "ankerctl",
+        "app_keys": {},
+    }
+
+
+def _ensure_octoprint_compat_state():
+    compat = app.config.get("octoprint_compat")
+    if compat is None:
+        compat = _default_octoprint_compat_state()
+        app.config["octoprint_compat"] = compat
+    return compat
+
+
+def _octoprint_state_payload(mqtt=None):
+    state_name = getattr(getattr(mqtt, "_state", None), "value", None)
+    is_printing = bool(getattr(mqtt, "is_printing", False))
+
+    text = "Operational"
+    flags = {
+        "operational": True,
+        "paused": False,
+        "printing": False,
+        "cancelling": False,
+        "pausing": False,
+        "sdReady": False,
+        "error": False,
+        "ready": True,
+        "closedOrError": False,
+    }
+
+    if state_name == "paused":
+        text = "Paused"
+        flags.update({
+            "operational": False,
+            "paused": True,
+            "printing": False,
+            "ready": False,
+        })
+    elif is_printing or state_name in {"preparing", "pre_print", "printing"}:
+        text = "Printing"
+        flags.update({
+            "operational": False,
+            "paused": False,
+            "printing": True,
+            "ready": False,
+        })
+
+    return {"text": text, "flags": flags}
+
+
+def _octoprint_printer_payload():
+    mqtt = get_mqtt_service()
+    return {
+        "temperature": {
+            "tool0": {
+                "actual": float(getattr(mqtt, "nozzle_temp", 0) or 0),
+                "target": float(getattr(mqtt, "nozzle_temp_target", 0) or 0),
+            },
+            "bed": {
+                "actual": float(getattr(mqtt, "_bed_temp", 0) or 0),
+                "target": float(getattr(mqtt, "_bed_temp_target", 0) or 0),
+            },
+        },
+        "state": _octoprint_state_payload(mqtt),
+    }
+
+
+def _octoprint_job_payload():
+    mqtt = get_mqtt_service()
+    state = getattr(mqtt, "get_state", lambda: {})() or {}
+    print_state = state.get("print", {}) if isinstance(state, dict) else {}
+    progress = print_state.get("last_progress") or 0
+    filename = print_state.get("last_filename")
+    elapsed = print_state.get("elapsed_seconds") or ""
+    remaining = print_state.get("remaining_seconds") or ""
+
+    if not elapsed and isinstance(print_state.get("started_at"), (int, float)):
+        elapsed = int(max(0, time.monotonic() - print_state["started_at"]))
+
+    job_state = _octoprint_state_payload(mqtt)["text"]
+    return {
+        "job": {
+            "file": {
+                "name": filename,
+                "origin": "local",
+            },
+        },
+        "progress": {
+            "completion": float(progress or 0),
+            "printTime": int(elapsed or 0),
+            "printTimeLeft": int(remaining or 0),
+        },
+        "state": job_state,
+    }
+
+
+def _octoprint_settings_payload():
+    stream_url = None
+    snapshot_url = None
+    if app.config.get("video_supported"):
+        stream_url = "/webcam/?action=stream"
+        snapshot_url = "/webcam/?action=snapshot"
+
+    return {
+        "feature": {
+            "sdSupport": False,
+        },
+        "webcam": {
+            "streamUrl": stream_url,
+            "snapshotUrl": snapshot_url,
+            "flipH": False,
+            "flipV": False,
+            "rotate90": False,
+        },
+        "plugins": {},
+        "appearance": {
+            "name": "ankerctl",
+        },
+    }
+
+
+def _clamp_command_line(line):
+    upper = line.upper()
+
+    if upper.startswith("M104 "):
+        match = re.search(r"\bS(-?\d+(?:\.\d+)?)", line, flags=re.IGNORECASE)
+        if match:
+            temp = float(match.group(1))
+            temp = min(max(temp, 0.0), float(_MAX_NOZZLE_TEMP_C))
+            replacement = f"S{int(temp) if temp.is_integer() else temp}"
+            line = f"{line[:match.start()]}{replacement}{line[match.end():]}"
+    elif upper.startswith("M140 "):
+        match = re.search(r"\bS(-?\d+(?:\.\d+)?)", line, flags=re.IGNORECASE)
+        if match:
+            temp = float(match.group(1))
+            temp = min(max(temp, 0.0), float(_MAX_BED_TEMP_C))
+            replacement = f"S{int(temp) if temp.is_integer() else temp}"
+            line = f"{line[:match.start()]}{replacement}{line[match.end():]}"
+    elif upper.startswith("G1 ") and re.search(r"\bE(-?\d+(?:\.\d+)?)", line, flags=re.IGNORECASE):
+        match = re.search(r"\bE(-?\d+(?:\.\d+)?)", line, flags=re.IGNORECASE)
+        amount = float(match.group(1))
+        amount = min(max(amount, -_MAX_EXTRUSION_MM), _MAX_EXTRUSION_MM)
+        replacement = f"E{int(amount) if amount.is_integer() else amount}"
+        line = f"{line[:match.start()]}{replacement}{line[match.end():]}"
+
+    return line
+
+
+def _sanitize_gcode_lines(lines):
+    return [_clamp_command_line(line) for line in lines]
+
+
+def _internal_video_url():
+    host = os.getenv("FLASK_HOST") or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = os.getenv("FLASK_PORT") or "4470"
+    return f"http://{host}:{port}/video"
+
+
+def _internal_video_ffmpeg_headers():
+    api_key = app.config.get("api_key")
+    if not api_key:
+        return []
+    return ["-headers", f"Authorization: Bearer {api_key}\r\n"]
 
 
 def _deep_update(base, updates):
@@ -2207,8 +2506,8 @@ def _validate_ws_auth(sock):
         return True
     if session.get("authenticated"):
         return True
-    header_key = request.headers.get("X-Api-Key")
-    if header_key and secrets.compare_digest(header_key, api_key):
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
         return True
     try:
         sock.send(json.dumps({"error": "unauthorized"}))
@@ -2605,12 +2904,10 @@ def video_download():
     # the request comes from localhost.
     api_key = app.config.get("api_key")
     if api_key:
-        _hdr = request.headers.get("X-Api-Key", "")
-        _qry = request.args.get("apikey", "")
+        provided_key = _request_api_key_value()
         authed = (
             session.get("authenticated")
-            or (_hdr and secrets.compare_digest(_hdr, api_key))
-            or (_qry and secrets.compare_digest(_qry, api_key))
+            or (provided_key and secrets.compare_digest(provided_key, api_key))
         )
         if not authed:
             log.warning("/video rejected: missing or invalid API key")
@@ -2643,6 +2940,78 @@ def video_download():
             vq.viewer_disconnected()
 
     return Response(generate(), mimetype="video/mp4")
+
+
+@app.get("/webcam/")
+@app.get("/webcam")
+def app_octoprint_webcam():
+    action = request.args.get("action", "stream")
+
+    if action == "snapshot":
+        return app_api_snapshot(as_attachment=False)
+
+    if action != "stream":
+        return {"error": "Invalid webcam action"}, 400
+
+    if not app.config.get("video_supported"):
+        return {"error": "Video not supported on this platform"}, 400
+
+    if not shutil.which("ffmpeg"):
+        return {"error": "ffmpeg not installed"}, 500
+
+    source_url = _internal_video_url()
+
+    def generate():
+        proc = None
+        stderr = None
+        try:
+            ffmpeg_headers = _internal_video_ffmpeg_headers()
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-loglevel", "error",
+                    "-nostdin",
+                    "-f", "h264",
+                    *ffmpeg_headers,
+                    "-i", source_url,
+                    "-vf", "fps=5",
+                    "-q:v", "5",
+                    "-f", "mpjpeg",
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            stderr = proc.stderr
+            while True:
+                chunk = proc.stdout.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            log.warning(f"OctoPrint webcam proxy failed: {exc}")
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            if stderr is not None:
+                try:
+                    err = stderr.read().decode("utf-8", "replace").strip()
+                    if err:
+                        log.warning(f"OctoPrint webcam ffmpeg stderr: {err}")
+                except Exception:
+                    pass
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=ffmpeg")
 
 
 @app.get("/")
@@ -2895,6 +3264,86 @@ def _config_import_status_message(action: str, source: str):
     return prefix + "."
 
 
+@app.get("/plugin/appkeys/probe")
+def app_plugin_appkeys_probe():
+    _ensure_octoprint_compat_state()
+    return Response(status=204)
+
+
+@app.post("/plugin/appkeys/request")
+def app_plugin_appkeys_request():
+    compat = _ensure_octoprint_compat_state()
+    request_id = token(16)
+    compat["app_keys"][request_id] = app.config.get("api_key") or compat["api_key"]
+
+    response = jsonify({
+        "app_token": request_id,
+        "auth_dialog": request.host_url.rstrip("/"),
+    })
+    response.status_code = 201
+    response.headers["Location"] = url_for(
+        "app_plugin_appkeys_request_poll",
+        request_id=request_id,
+        _external=True,
+    )
+    return response
+
+
+@app.get("/plugin/appkeys/request/<request_id>")
+def app_plugin_appkeys_request_poll(request_id):
+    compat = _ensure_octoprint_compat_state()
+    api_key = compat["app_keys"].pop(request_id, None)
+    if api_key is None:
+        return {"error": "Unknown app key request"}, 404
+    return {"api_key": api_key}
+
+
+@app.get("/api/settings")
+def app_api_settings():
+    _ensure_octoprint_compat_state()
+    return _octoprint_settings_payload()
+
+
+@app.get("/api/printer")
+def app_api_printer():
+    return _octoprint_printer_payload()
+
+
+@app.get("/api/job")
+def app_api_job():
+    return _octoprint_job_payload()
+
+
+@app.get("/api/currentuser")
+def app_api_currentuser():
+    """Return the current user in an OctoPrint-compatible shape."""
+    authenticated = _octoprint_is_authenticated()
+    return jsonify(_octoprint_user_record(authenticated=authenticated))
+
+
+@app.post("/api/login")
+def app_api_login():
+    """Provide passive OctoPrint-compatible login for slicer clients."""
+    payload = request.get_json(silent=True)
+    passive = True
+    if isinstance(payload, dict):
+        passive = payload.get("passive", True)
+
+    if not passive:
+        return jsonify({"error": "Only passive login is supported."}), 400
+
+    authenticated = _octoprint_is_authenticated()
+    user = _octoprint_user_record(authenticated=authenticated)
+    session_key = request.cookies.get(app.config.get("SESSION_COOKIE_NAME", "session")) or ""
+
+    return jsonify({
+        **user,
+        "_is_external_client": False,
+        "_login_mechanism": "apikey" if _request_has_valid_api_key() else "session",
+        "session": session_key,
+    })
+
+
 @app.post("/api/ankerctl/config/upload")
 def app_api_ankerctl_config_upload():
     """
@@ -3050,7 +3499,7 @@ def app_api_files_local():
     user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
 
     try:
-        no_act = not cli.util.parse_http_bool(request.form.get("print", "false"))
+        no_act = not cli.util.parse_http_bool(request.form.get("print", "true"))
     except ValueError:
         return {"error": "Invalid value for 'print' field"}, 400
 
@@ -3075,10 +3524,22 @@ def app_api_files_local():
                 "Please verify that printer is online, and on the same network as ankerctl."
             )
 
+    file_info = {
+        "name": getattr(fd, "filename", None),
+        "origin": "local",
+    }
+
     return {
         "status": "ok",
         "upload_rate_mbps": rate_limit_mbps,
         "upload_rate_source": rate_limit_source,
+        "files": {
+            "local": {
+                "name": file_info["name"],
+                "refs": {"resource": f"/api/files/local/{file_info['name']}"} if file_info["name"] else {},
+            }
+        },
+        "done": True,
     }
 
 
@@ -3545,7 +4006,7 @@ def app_api_printer_gcode():
     if not lines:
         return {"error": "No executable gcode lines found"}, 400
 
-    normalized_gcode = "\n".join(lines)
+    normalized_gcode = "\n".join(_sanitize_gcode_lines(lines))
 
     with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing:
@@ -4369,7 +4830,7 @@ def app_api_camera_stream():
 
 
 @app.get("/api/snapshot")
-def app_api_snapshot():
+def app_api_snapshot(as_attachment=True):
     """Capture a JPEG snapshot from the camera and return it as a file download."""
     import subprocess
     from datetime import datetime
@@ -4424,7 +4885,7 @@ def app_api_snapshot():
             pass
         return response
 
-    return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
+    return send_file(temp_path, mimetype="image/jpeg", as_attachment=as_attachment)
 
 @app.get("/api/history")
 def app_api_history():
@@ -5641,6 +6102,8 @@ _SETUP_PATHS = {
     "/api/ankerctl/config/login",
 }
 
+_UNAUTHENTICATED_WRITE_PATHS = set()
+
 # URL path prefixes that send commands to the printer and must be blocked
 # when the active device is not supported (e.g. eufyMake E1 UV printer).
 # Any request whose path starts with one of these prefixes is rejected.
@@ -5743,9 +6206,9 @@ def _check_api_key():
         clean_url = _safe_same_site_redirect_target(request.path, params)
         return redirect(clean_url)
 
-    # Check X-Api-Key header (slicer / programmatic access)
-    header_key = request.headers.get("X-Api-Key")
-    if header_key and secrets.compare_digest(header_key, api_key):
+    # Check supported API-key transports used by OctoPrint-compatible clients.
+    provided_key = _request_api_key_value()
+    if provided_key and secrets.compare_digest(provided_key, api_key):
         return None
 
     # Allow read-only (GET/HEAD/OPTIONS) unless the path is explicitly protected.
@@ -5759,6 +6222,9 @@ def _check_api_key():
         return None
 
     # Allow setup endpoints when no printer is configured yet
+    if request.path in _UNAUTHENTICATED_WRITE_PATHS:
+        return None
+
     if not app.config.get("login") and request.path in _SETUP_PATHS:
         return None
 
@@ -5769,4 +6235,4 @@ def _check_api_key():
         return None
 
     # Unauthorized
-    return jsonify({"error": "Unauthorized. Provide API key via X-Api-Key header or ?apikey= parameter."}), 401
+    return jsonify({"error": "Unauthorized. Provide API key via Authorization: Bearer, X-Api-Key header or ?apikey= parameter."}), 401

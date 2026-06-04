@@ -131,7 +131,7 @@ def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_pr
     try:
         normal = client.post(
             "/api/printer/gcode",
-            json={"gcode": "G28 ; home\n\nM104 S200\n"},
+            json={"gcode": "G28 ; home\n\nM104 S300\nM140 S150\nG1 E125\n"},
             headers={"X-Api-Key": API_KEY},
         )
         mqtt.is_printing = True
@@ -151,7 +151,148 @@ def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_pr
     assert normal.status_code == 200
     assert safe.status_code == 200
     assert blocked.status_code == 409
-    assert sent == ["G28\nM104 S200", "M117 Printing"]
+    assert sent == ["G28\nM104 S260\nM140 S100\nG1 E100", "M117 Printing"]
+
+
+def test_octoprint_compat_routes_expose_cura_expected_shapes():
+    mqtt = SimpleNamespace(
+        is_printing=True,
+        nozzle_temp=215,
+        nozzle_temp_target=220,
+        _bed_temp=60,
+        _bed_temp_target=65,
+        _state=SimpleNamespace(value="printing"),
+        get_state=lambda: {
+            "print": {
+                "last_progress": 42,
+                "last_filename": "cube.gcode",
+            }
+        },
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        probe = client.get("/plugin/appkeys/probe")
+        request_token = client.post("/plugin/appkeys/request", headers={"X-Api-Key": API_KEY})
+        request_id = request_token.get_json()["app_token"]
+        poll = client.get(f"/plugin/appkeys/request/{request_id}", headers={"X-Api-Key": API_KEY})
+        settings = client.get("/api/settings")
+        printer = client.get("/api/printer")
+        job = client.get("/api/job")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert probe.status_code == 204
+    assert request_token.status_code == 201
+    assert poll.get_json()["api_key"] == API_KEY
+    assert settings.get_json()["appearance"]["name"] == "ankerctl"
+    assert settings.get_json()["webcam"]["streamUrl"] == "/webcam/?action=stream"
+    assert settings.get_json()["webcam"]["snapshotUrl"] == "/webcam/?action=snapshot"
+    assert printer.get_json()["temperature"]["tool0"]["actual"] == 215.0
+    assert printer.get_json()["state"]["flags"]["printing"] is True
+    assert job.get_json()["job"]["file"]["name"] == "cube.gcode"
+    assert job.get_json()["progress"]["completion"] == 42.0
+
+
+def test_octoprint_appkeys_request_requires_auth_and_unknown_poll_404():
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+
+    try:
+        unauthorized = client.post("/plugin/appkeys/request")
+        missing = client.get("/plugin/appkeys/request/not-a-real-request", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert unauthorized.status_code == 401
+    assert missing.status_code == 404
+
+
+def test_octoprint_webcam_snapshot_delegates_to_snapshot_route(monkeypatch):
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+
+    calls = []
+
+    def fake_snapshot(as_attachment=True):
+        calls.append(as_attachment)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("web.app_api_snapshot", fake_snapshot)
+
+    try:
+        response = client.get("/webcam/?action=snapshot")
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
+    assert calls == [False]
+
+
+def test_octoprint_upload_defaults_to_print_and_returns_octoprint_shape():
+    sent = []
+
+    class FakeFileTransfer:
+        def send_file(self, fd, user_name, rate_limit_mbps=None, start_print=None, printer_index=None):
+            sent.append({
+                "filename": fd.filename,
+                "user_name": user_name,
+                "rate_limit_mbps": rate_limit_mbps,
+                "start_print": start_print,
+                "printer_index": printer_index,
+            })
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+    app.svc = FakeServices(mqttqueue=SimpleNamespace(is_printing=False), filetransfer=FakeFileTransfer())
+
+    try:
+        response = client.post(
+            "/api/files/local",
+            data={"file": (__import__("io").BytesIO(b"G28"), "cube.gcode")},
+            headers={"X-Api-Key": API_KEY},
+            content_type="multipart/form-data",
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert sent[0]["start_print"] is True
+    assert response.get_json()["files"]["local"]["name"] == "cube.gcode"
+
+
+def test_octoprint_upload_accepts_bearer_api_key():
+    sent = []
+
+    class FakeFileTransfer:
+        def send_file(self, fd, user_name, rate_limit_mbps=None, start_print=None, printer_index=None):
+            sent.append({
+                "filename": fd.filename,
+                "user_name": user_name,
+                "rate_limit_mbps": rate_limit_mbps,
+                "start_print": start_print,
+                "printer_index": printer_index,
+            })
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+    app.svc = FakeServices(mqttqueue=SimpleNamespace(is_printing=False), filetransfer=FakeFileTransfer())
+
+    try:
+        response = client.post(
+            "/api/files/local",
+            data={"file": (__import__("io").BytesIO(b"G28"), "cube.gcode")},
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            content_type="multipart/form-data",
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert sent[0]["start_print"] is True
+    assert response.get_json()["files"]["local"]["name"] == "cube.gcode"
 
 
 def test_printer_control_and_autolevel_routes_validate_and_dispatch():
