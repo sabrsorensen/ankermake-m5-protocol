@@ -174,9 +174,9 @@ def test_octoprint_compat_routes_expose_cura_expected_shapes():
 
     try:
         probe = client.get("/plugin/appkeys/probe")
-        request_token = client.post("/plugin/appkeys/request")
+        request_token = client.post("/plugin/appkeys/request", headers={"X-Api-Key": API_KEY})
         request_id = request_token.get_json()["app_token"]
-        poll = client.get(f"/plugin/appkeys/request/{request_id}")
+        poll = client.get(f"/plugin/appkeys/request/{request_id}", headers={"X-Api-Key": API_KEY})
         settings = client.get("/api/settings")
         printer = client.get("/api/printer")
         job = client.get("/api/job")
@@ -193,6 +193,20 @@ def test_octoprint_compat_routes_expose_cura_expected_shapes():
     assert printer.get_json()["state"]["flags"]["printing"] is True
     assert job.get_json()["job"]["file"]["name"] == "cube.gcode"
     assert job.get_json()["progress"]["completion"] == 42.0
+
+
+def test_octoprint_appkeys_request_requires_auth_and_unknown_poll_404():
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace(is_printing=False))
+
+    try:
+        unauthorized = client.post("/plugin/appkeys/request")
+        missing = client.get("/plugin/appkeys/request/not-a-real-request", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert unauthorized.status_code == 401
+    assert missing.status_code == 404
 
 
 def test_octoprint_webcam_snapshot_delegates_to_snapshot_route(monkeypatch):
