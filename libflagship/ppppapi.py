@@ -348,17 +348,19 @@ class AnkerPPPPBaseApi(Thread):
         self._remote_close_count = 0
 
     @classmethod
-    def open(cls, duid, host, port):
-        sock = _configure_udp_socket(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+    def open(cls, duid, host, port, bind_port=None):
+        sock = _configure_udp_socket(
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
+            local_port=bind_port,
+        )
         return cls(sock, duid, addr=(host, port))
 
     @classmethod
     def open_lan(cls, duid, host):
-        sock = _configure_udp_socket(
-            socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
-            local_port=PPPP_LAN_PORT,
-        )
-        return cls(sock, duid, addr=(host, PPPP_LAN_PORT))
+        try:
+            return cls.open(duid, host, PPPP_LAN_PORT, bind_port=PPPP_LAN_PORT)
+        except OSError:
+            return cls.open(duid, host, PPPP_LAN_PORT)
 
     @classmethod
     def open_wan(cls, duid, host):
@@ -366,11 +368,17 @@ class AnkerPPPPBaseApi(Thread):
 
     @classmethod
     def open_broadcast(cls):
-        sock = _configure_udp_socket(
-            socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
-            broadcast=True,
-            local_port=PPPP_LAN_PORT,
-        )
+        try:
+            sock = _configure_udp_socket(
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
+                broadcast=True,
+                local_port=PPPP_LAN_PORT,
+            )
+        except OSError:
+            sock = _configure_udp_socket(
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM),
+                broadcast=True,
+            )
         addr = ("255.255.255.255", PPPP_LAN_PORT)
         return cls(sock, duid=None, addr=addr)
 

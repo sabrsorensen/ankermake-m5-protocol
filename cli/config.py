@@ -253,7 +253,7 @@ def import_config_from_server(config, login_data, insecure):
     cfg = merge_config_preferences(existing, cfg)
 
     config.save("default", cfg)
-    update_empty_printer_ips(config, printer_ips)
+    restore_printer_ips(config, printer_ips)
 
 
 def get_printer_ips(config):
@@ -266,10 +266,10 @@ def get_printer_ips(config):
     return printer_ips
 
 
-def update_empty_printer_ips(config, printer_ips):
+def restore_printer_ips(config, printer_ips):
     with config.modify() as cfg:
         for printer in cfg.printers:
-            if not printer.ip_addr and printer.sn in printer_ips:
+            if printer.sn in printer_ips and printer.ip_addr != printer_ips[printer.sn]:
                 log.debug(f"Updating IP address of printer [{printer.sn}] to {printer_ips[printer.sn]}")
                 printer.ip_addr = printer_ips[printer.sn]
 

@@ -1,6 +1,7 @@
 services:
     ankerctl:
         image: django01982/ankerctl:local
+        build: .
         container_name: ankerctl
         restart: unless-stopped
 

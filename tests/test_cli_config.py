@@ -12,7 +12,7 @@ from cli.config import (
     import_config_from_server,
     merge_config_preferences,
     resolve_api_key,
-    update_empty_printer_ips,
+    restore_printer_ips,
     validate_api_key,
 )
 from cli.model import Account, Config, Printer
@@ -97,7 +97,7 @@ def test_merge_config_preferences_preserves_user_settings():
     assert merged.notifications["apprise"]["events"]["print_started"] is False
 
 
-def test_update_empty_printer_ips_only_fills_missing_values():
+def test_restore_printer_ips_prefers_known_local_values():
     cfg = _sample_config()
     cfg.printers.append(_sample_printer(sn="SN-2", ip_addr="192.168.1.25"))
 
@@ -107,10 +107,10 @@ def test_update_empty_printer_ips_only_fills_missing_values():
 
     manager = SimpleNamespace(modify=modify)
 
-    update_empty_printer_ips(manager, {"SN-1": "192.168.1.10", "SN-2": "192.168.1.20"})
+    restore_printer_ips(manager, {"SN-1": "192.168.1.10", "SN-2": "192.168.1.20"})
 
     assert cfg.printers[0].ip_addr == "192.168.1.10"
-    assert cfg.printers[1].ip_addr == "192.168.1.25"
+    assert cfg.printers[1].ip_addr == "192.168.1.20"
 
 
 def test_config_manager_round_trips_serialized_config(tmp_path):
