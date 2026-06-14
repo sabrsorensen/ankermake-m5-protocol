@@ -2987,39 +2987,51 @@ def app_octoprint_webcam():
     if not app.config.get("video_supported"):
         return {"error": "Video not supported on this platform"}, 400
 
-    if not shutil.which("ffmpeg"):
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
         return {"error": "ffmpeg not installed"}, 500
 
-    source_url = _internal_video_url()
+    printer_index = _requested_printer_index()
+    camera_settings = _resolve_camera_settings(printer_index=printer_index)
+    camera_error = _validate_selected_printer_camera(camera_settings, stream_state=False)
+    if camera_error is not None:
+        return camera_error
+    flask_host, flask_port = _local_web_host_port()
+    api_key = app.config.get("api_key")
 
     def generate():
         proc = None
         stderr = None
         try:
-            ffmpeg_headers = _internal_video_ffmpeg_headers()
-            proc = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-loglevel", "error",
-                    "-nostdin",
-                    "-f", "h264",
-                    *ffmpeg_headers,
-                    "-i", source_url,
-                    "-vf", "fps=5",
-                    "-q:v", "5",
-                    "-f", "mpjpeg",
-                    "pipe:1",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
+            # Flush headers before waiting on cold-start frame availability.
+            yield b"\r\n"
+            prewarm_vq = _prewarm_video_service(printer_index)
+            video_url = (
+                f"http://{flask_host}:{flask_port}/video"
+                f"?for_timelapse=1&printer_index={printer_index}"
             )
-            stderr = proc.stderr
-            while True:
-                chunk = proc.stdout.read(8192)
-                if not chunk:
-                    break
-                yield chunk
+            extra_headers = f"X-Api-Key: {api_key}\r\n" if api_key else None
+            try:
+                proc = web.camera.open_printer_mjpeg_stream(
+                    ffmpeg_path,
+                    video_url,
+                    fps=5,
+                    scale=(1280, 720),
+                    quality=5,
+                    extra_headers=extra_headers,
+                )
+                for frame in web.camera.iter_mjpeg_frames(proc):
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Cache-Control: no-store\r\n"
+                        b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                        + frame + b"\r\n"
+                    )
+            finally:
+                web.camera.stop_external_mjpeg_stream(proc)
+                if prewarm_vq is not None:
+                    prewarm_vq.viewer_disconnected()
         except GeneratorExit:
             raise
         except Exception as exc:
@@ -3042,7 +3054,7 @@ def app_octoprint_webcam():
                 except Exception:
                     pass
 
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=ffmpeg")
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.get("/")
