@@ -191,9 +191,9 @@ class FileTransferService(Service):
             })
             self._notify_apprise_upload(upload_name, fui.size, start_print)
         finally:
-            self._resume_video_after_upload(effective_printer_index, suspended_services)
             if pppp_ctx is not None:
                 pppp_ctx.__exit__(None, None, None)
+            self._resume_video_after_upload(effective_printer_index, suspended_services)
 
     def _notify_apprise_upload(self, filename, size_bytes, start_print):
         payload = {
