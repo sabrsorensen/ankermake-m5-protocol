@@ -35,13 +35,10 @@ class FileTransferService(Service):
         except Exception as e:
             log.warning(f"Upload progress notify failed: {e}")
 
-    def _suspend_pppp_for_upload(self, printer_index):
+    def _suspend_video_for_upload(self, printer_index):
         import web
 
-        suspended = {
-            "video_wanted": False,
-            "pppp_wanted": False,
-        }
+        suspended = {"video_wanted": False}
 
         videoqueue = web.get_video_service(printer_index)
         if videoqueue is not None:
@@ -51,23 +48,10 @@ class FileTransferService(Service):
                 videoqueue.stop()
                 videoqueue.await_stopped()
 
-        pppp = web.get_pppp_service(printer_index)
-        if pppp is not None:
-            suspended["pppp_wanted"] = bool(getattr(pppp, "wanted", False))
-            if suspended["pppp_wanted"]:
-                log.info("Suspending PPPP service for upload to avoid PPPP session conflicts")
-                pppp.stop()
-                pppp.await_stopped()
-
         return suspended
 
-    def _resume_pppp_after_upload(self, printer_index, suspended):
+    def _resume_video_after_upload(self, printer_index, suspended):
         import web
-
-        if suspended.get("pppp_wanted"):
-            pppp = web.get_pppp_service(printer_index)
-            if pppp is not None:
-                pppp.start()
 
         if suspended.get("video_wanted"):
             videoqueue = web.get_video_service(printer_index)
@@ -144,20 +128,22 @@ class FileTransferService(Service):
                 "start_print": start_print_flag,
             })
         effective_printer_index = printer_index if printer_index is not None else app.config.get("printer_index", 0)
-        suspended_services = {"video_wanted": False, "pppp_wanted": False}
+        suspended_services = {"video_wanted": False}
         api = None
+        pppp_ctx = None
         try:
-            suspended_services = self._suspend_pppp_for_upload(effective_printer_index)
-            api = cli.pppp.pppp_open(
-                app.config["config"],
-                effective_printer_index,
-                timeout=self.REPLY_TIMEOUT,
-                dumpfile=pppp_dump,
-            )
-        except Exception as e:
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
-            raise ConnectionError(f"No pppp connection to printer: {e}") from e
-        try:
+            import web
+
+            pppp_ctx = web.borrow_pppp(effective_printer_index, ready=True)
+            pppp = pppp_ctx.__enter__()
+            if not web._await_pppp_connected(pppp, timeout=self.REPLY_TIMEOUT):
+                raise ConnectionError("Shared PPPP service is not connected")
+
+            suspended_services = self._suspend_video_for_upload(effective_printer_index)
+            api = getattr(pppp, "_api", None)
+            if api is None:
+                raise ConnectionError("Shared PPPP API is not available")
+
             cli.pppp.pppp_send_file(
                 api,
                 fui,
@@ -205,9 +191,9 @@ class FileTransferService(Service):
             })
             self._notify_apprise_upload(upload_name, fui.size, start_print)
         finally:
-            if api is not None:
-                api.stop()
-            self._resume_pppp_after_upload(effective_printer_index, suspended_services)
+            self._resume_video_after_upload(effective_printer_index, suspended_services)
+            if pppp_ctx is not None:
+                pppp_ctx.__exit__(None, None, None)
 
     def _notify_apprise_upload(self, filename, size_bytes, start_print):
         payload = {

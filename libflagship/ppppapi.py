@@ -544,13 +544,6 @@ class AnkerPPPPBaseApi(Thread):
     def reset_chan_tx(self, chan=1):
         self.chans[chan].reset_tx()
 
-
-class AnkerPPPPApi(AnkerPPPPBaseApi):
-
-    def __init__(self, sock, duid, addr=None):
-        super().__init__(sock, duid, addr)
-        self.daemon = True
-
     def recv_xzyh(self, chan=1, timeout=None):
         fd = self.chans[chan]
 
@@ -597,6 +590,14 @@ class AnkerPPPPApi(AnkerPPPPBaseApi):
     def aabb_request(self, data, frametype, pos=0, chan=1, check=True, timeout=None):
         self.send_aabb(data=data, frametype=frametype, chan=chan, pos=pos, timeout=timeout)
         return self.recv_aabb_reply(chan, check, timeout=timeout)
+
+
+class AnkerPPPPApi(AnkerPPPPBaseApi):
+
+    def __init__(self, sock, duid, addr=None):
+        super().__init__(sock, duid, addr)
+        self.daemon = True
+
 
 
 class AnkerPPPPAsyncApi(AnkerPPPPBaseApi):
